@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+import google.auth
+import google.auth.transport.requests
 from google.cloud import storage as gcs_storage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -201,20 +203,30 @@ def _upload_html_and_presign(html_path: Path) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     key = f"{prefix}{ts}_{uuid.uuid4().hex}.html"
 
-    # ADC（Application Default Credentials）を使用 - JSONキーファイル不要
-    client = gcs_storage.Client()
+    # ADC で認証情報を取得し、アクセストークンを更新する
+    # Cloud Run では Compute Engine credentials が返る（秘密鍵なし）
+    # generate_signed_url には service_account_email + access_token を渡すことで
+    # IAM SignBlob API 経由で署名させる
+    credentials, project = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google.auth.transport.requests.Request()
+    credentials.refresh(auth_req)
+
+    client = gcs_storage.Client(credentials=credentials, project=project)
     blob = client.bucket(bucket).blob(key)
     blob.upload_from_filename(
         str(html_path),
         content_type="text/html; charset=utf-8",
     )
-    blob.cache_control = "no-store"
-    blob.patch()
 
+    # service_account_email + access_token を使って IAM 経由で署名付きURL生成
     signed_url = blob.generate_signed_url(
         expiration=timedelta(seconds=PRESIGNED_EXPIRES_SECONDS),
         method="GET",
         version="v4",
+        service_account_email=credentials.service_account_email,
+        access_token=credentials.token,
     )
     return signed_url
 
